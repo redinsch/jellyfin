@@ -1,29 +1,33 @@
 # Custom Jellyfin Docker build for fork with cherry-picked patches.
-# Stage 1: Download pre-built jellyfin-web release artifact
+# Stage 1: Build jellyfin-web from official source tarball
 # Stage 2: Build jellyfin-server from (patched) source
 # Stage 3: Assemble runtime image with ffmpeg
 
 ARG DOTNET_VERSION=10.0
+ARG NODEJS_VERSION=20
 ARG OS_VERSION=trixie
 ARG FFMPEG_PACKAGE=jellyfin-ffmpeg7
 
 # ======================== Stage 1: Web UI ========================
-FROM debian:${OS_VERSION}-slim AS web
+FROM node:${NODEJS_VERSION}-alpine AS web
 
 ARG JELLYFIN_VERSION
 
-RUN apt-get update \
- && apt-get install --no-install-recommends --no-install-suggests --yes \
-    curl ca-certificates \
- && rm -rf /var/lib/apt/lists/*
+RUN apk add --no-cache curl autoconf g++ make libpng-dev gifsicle \
+    alpine-sdk automake libtool gcc musl-dev nasm python3
 
-# Download official jellyfin-web portable release
+# Download and build official jellyfin-web from source
 RUN curl -fSL \
-    "https://github.com/jellyfin/jellyfin-web/releases/download/v${JELLYFIN_VERSION}/jellyfin-web_${JELLYFIN_VERSION}_portable.tar.gz" \
+    "https://codeload.github.com/jellyfin/jellyfin-web/tar.gz/refs/tags/v${JELLYFIN_VERSION}" \
     -o /tmp/jellyfin-web.tar.gz \
- && mkdir -p /web \
- && tar -xzf /tmp/jellyfin-web.tar.gz -C /web --strip-components=1 \
+ && mkdir -p /src \
+ && tar -xzf /tmp/jellyfin-web.tar.gz -C /src --strip-components=1 \
  && rm /tmp/jellyfin-web.tar.gz
+
+WORKDIR /src
+RUN npm ci --no-audit --unsafe-perm \
+ && npm run build:production \
+ && mv dist /web
 
 # ======================== Stage 2: Server ========================
 FROM debian:${OS_VERSION}-slim AS server

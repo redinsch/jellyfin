@@ -136,23 +136,23 @@ jobs:
 
           echo "branch=${BUILD_BRANCH}" >> "$GITHUB_OUTPUT"
 
-      # ── 5. Verify jellyfin-web release artifact exists ──
-      - name: Verify jellyfin-web release
+      # ── 5. Verify jellyfin-web source tag exists ──
+      - name: Verify jellyfin-web tag
         if: steps.check.outputs.skip == 'false'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           VERSION="${{ steps.upstream.outputs.version }}"
-          URL="https://github.com/jellyfin/jellyfin-web/releases/download/v${VERSION}/jellyfin-web_${VERSION}_portable.tar.gz"
+          URL="https://codeload.github.com/jellyfin/jellyfin-web/tar.gz/refs/tags/v${VERSION}"
 
-          echo "Checking jellyfin-web artifact: ${URL}"
+          echo "Checking jellyfin-web source tag: v${VERSION}"
           HTTP_CODE=$(curl -sI -o /dev/null -w "%{http_code}" -L "${URL}")
-          if [[ "${HTTP_CODE}" != "200" && "${HTTP_CODE}" != "302" ]]; then
-            echo "::error::jellyfin-web release artifact not found for version ${VERSION} (HTTP ${HTTP_CODE})"
+          if [[ "${HTTP_CODE}" != "200" ]]; then
+            echo "::error::jellyfin-web tag v${VERSION} not found (HTTP ${HTTP_CODE})"
             echo "::error::URL: ${URL}"
             exit 1
           fi
-          echo "Artifact available (HTTP ${HTTP_CODE})."
+          echo "Tag available (HTTP ${HTTP_CODE})."
 
       # ── 6. Log in to GHCR ──
       - name: Log in to GitHub Container Registry
