@@ -91,6 +91,9 @@ jobs:
             exit 1
           fi
 
+          # Remember fork HEAD so we can restore the Dockerfile later
+          FORK_SHA=$(git rev-parse HEAD)
+
           # Start a build branch from the upstream tag
           BUILD_BRANCH="build/${UPSTREAM_TAG}-custom"
           git checkout -b "${BUILD_BRANCH}" "refs/tags/${UPSTREAM_TAG}"
@@ -133,6 +136,9 @@ jobs:
               fi
             done
           fi
+
+          # Restore Dockerfile from fork (not present in upstream)
+          git checkout "${FORK_SHA}" -- Dockerfile .dockerignore
 
           echo "branch=${BUILD_BRANCH}" >> "$GITHUB_OUTPUT"
 
