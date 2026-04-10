@@ -3,7 +3,7 @@
 # Stage 2: Build jellyfin-server from (patched) source
 # Stage 3: Assemble runtime image with ffmpeg
 
-ARG DOTNET_VERSION=10.0
+ARG DOTNET_VERSION=9.0
 ARG NODEJS_VERSION=20
 ARG OS_VERSION=trixie
 ARG FFMPEG_PACKAGE=jellyfin-ffmpeg7

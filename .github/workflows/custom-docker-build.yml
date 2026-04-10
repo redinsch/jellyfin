@@ -140,6 +140,11 @@ jobs:
           # Restore Dockerfile from fork (not present in upstream)
           git checkout "${FORK_SHA}" -- Dockerfile .dockerignore
 
+          # Read .NET SDK version from the checked-out global.json
+          DOTNET_VERSION=$(python3 -c "import json; print(json.load(open('global.json'))['sdk']['version'].rsplit('.', 1)[0])")
+          echo "Detected .NET SDK channel: ${DOTNET_VERSION}"
+          echo "dotnet_version=${DOTNET_VERSION}" >> "$GITHUB_OUTPUT"
+
           echo "branch=${BUILD_BRANCH}" >> "$GITHUB_OUTPUT"
 
       # ── 5. Verify jellyfin-web source tag exists ──
@@ -184,6 +189,7 @@ jobs:
           push: true
           build-args: |
             JELLYFIN_VERSION=${{ steps.upstream.outputs.version }}
+            DOTNET_VERSION=${{ steps.patch.outputs.dotnet_version }}
           tags: |
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.upstream.outputs.tag }}-custom
