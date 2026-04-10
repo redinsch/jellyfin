@@ -1,0 +1,210 @@
+name: Custom Docker Build on Upstream Release
+
+on:
+  schedule:
+    # Daily at 06:00 UTC
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+    inputs:
+      force_tag:
+        description: "Force build for a specific upstream tag (e.g. v10.11.8). Leave empty for auto-detect."
+        required: false
+        type: string
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+  # Commit author used to identify cherry-pick candidates.
+  # Matches commits from this fork that are NOT in upstream.
+  FORK_AUTHOR: redinsch
+
+jobs:
+  check-and-build:
+    runs-on: ubuntu-latest
+    steps:
+
+      # ── 1. Checkout fork (full history for cherry-pick) ──
+      - name: Checkout fork
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      # ── 2. Discover latest upstream release tag ──
+      - name: Determine upstream tag
+        id: upstream
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [[ -n "${{ inputs.force_tag }}" ]]; then
+            TAG="${{ inputs.force_tag }}"
+            echo "Using forced tag: ${TAG}"
+          else
+            TAG=$(gh api repos/jellyfin/jellyfin/releases/latest --jq '.tag_name')
+            echo "Latest upstream release: ${TAG}"
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+          # Strip leading 'v' for version number
+          VERSION="${TAG#v}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      # ── 3. Check if we already built this tag ──
+      - name: Check for existing custom build
+        id: check
+        run: |
+          CUSTOM_TAG="custom-${{ steps.upstream.outputs.tag }}"
+          git fetch --tags
+          if git rev-parse "refs/tags/${CUSTOM_TAG}" >/dev/null 2>&1; then
+            echo "Tag ${CUSTOM_TAG} already exists — skipping build."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No existing build for ${CUSTOM_TAG} — proceeding."
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # ── 4. Fetch upstream and prepare cherry-pick branch ──
+      - name: Prepare patched branch
+        if: steps.check.outputs.skip == 'false'
+        id: patch
+        run: |
+          UPSTREAM_TAG="${{ steps.upstream.outputs.tag }}"
+
+          # Add upstream remote if not present
+          if ! git remote get-url upstream >/dev/null 2>&1; then
+            git remote add upstream https://github.com/jellyfin/jellyfin.git
+          fi
+          git fetch upstream --tags
+
+          # Verify upstream tag exists
+          if ! git rev-parse "refs/tags/${UPSTREAM_TAG}" >/dev/null 2>&1; then
+            echo "::error::Upstream tag ${UPSTREAM_TAG} not found"
+            exit 1
+          fi
+
+          # Start a detached build branch from the upstream tag
+          BUILD_BRANCH="build/${UPSTREAM_TAG}-custom"
+          git checkout -b "${BUILD_BRANCH}" "refs/tags/${UPSTREAM_TAG}"
+
+          # Collect fork-only commits: commits by FORK_AUTHOR on the fork's
+          # default branch that are NOT in upstream. Excludes merge commits.
+          # Ordered oldest-first so cherry-pick applies cleanly.
+          FORK_DEFAULT=$(git remote show origin | sed -n 's/.*HEAD branch: //p')
+          git fetch origin "${FORK_DEFAULT}"
+
+          COMMITS=$(git log --reverse --no-merges --author="${FORK_AUTHOR}" \
+            --format="%H" "upstream/${FORK_DEFAULT}..origin/${FORK_DEFAULT}" || true)
+
+          if [[ -z "${COMMITS}" ]]; then
+            # Fallback: also check current branch if default branch differs
+            COMMITS=$(git log --reverse --no-merges --author="${FORK_AUTHOR}" \
+              --format="%H" "refs/tags/${UPSTREAM_TAG}..origin/${FORK_DEFAULT}" || true)
+          fi
+
+          if [[ -z "${COMMITS}" ]]; then
+            echo "::warning::No fork-specific commits found by ${FORK_AUTHOR}. Building vanilla upstream."
+          else
+            echo "Found commits to cherry-pick:"
+            echo "${COMMITS}" | while read -r sha; do
+              echo "  - $(git log --oneline -1 "${sha}")"
+            done
+
+            # Cherry-pick each commit; abort on conflict
+            for sha in ${COMMITS}; do
+              echo "Cherry-picking ${sha}..."
+              if ! git cherry-pick --no-commit "${sha}"; then
+                echo "::error::Cherry-pick conflict on commit ${sha}: $(git log --oneline -1 "${sha}")"
+                echo "::error::Manual intervention required. Resolve the conflict and re-run with force_tag=${{ steps.upstream.outputs.tag }}"
+                git cherry-pick --abort
+                exit 1
+              fi
+              git commit -C "${sha}" --allow-empty
+            done
+          fi
+
+          echo "branch=${BUILD_BRANCH}" >> "$GITHUB_OUTPUT"
+
+      # ── 5. Verify jellyfin-web release artifact exists ──
+      - name: Verify jellyfin-web release
+        if: steps.check.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ steps.upstream.outputs.version }}"
+          URL="https://github.com/jellyfin/jellyfin-web/releases/download/v${VERSION}/jellyfin-web_${VERSION}_portable.tar.gz"
+
+          echo "Checking jellyfin-web artifact: ${URL}"
+          HTTP_CODE=$(curl -sI -o /dev/null -w "%{http_code}" -L "${URL}")
+          if [[ "${HTTP_CODE}" != "200" && "${HTTP_CODE}" != "302" ]]; then
+            echo "::error::jellyfin-web release artifact not found for version ${VERSION} (HTTP ${HTTP_CODE})"
+            echo "::error::URL: ${URL}"
+            exit 1
+          fi
+          echo "Artifact available (HTTP ${HTTP_CODE})."
+
+      # ── 6. Log in to GHCR ──
+      - name: Log in to GitHub Container Registry
+        if: steps.check.outputs.skip == 'false'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # ── 7. Set up Docker Buildx ──
+      - name: Set up Docker Buildx
+        if: steps.check.outputs.skip == 'false'
+        uses: docker/setup-buildx-action@v3
+
+      # ── 8. Build and push Docker image ──
+      - name: Build and push Docker image
+        if: steps.check.outputs.skip == 'false'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          build-args: |
+            JELLYFIN_VERSION=${{ steps.upstream.outputs.version }}
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.upstream.outputs.tag }}-custom
+          labels: |
+            org.opencontainers.image.title=Jellyfin (custom fork)
+            org.opencontainers.image.version=${{ steps.upstream.outputs.version }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # ── 9. Tag this build so we don't rebuild it ──
+      - name: Create custom git tag
+        if: steps.check.outputs.skip == 'false'
+        run: |
+          CUSTOM_TAG="custom-${{ steps.upstream.outputs.tag }}"
+          git tag "${CUSTOM_TAG}"
+          git push origin "${CUSTOM_TAG}"
+          echo "Pushed tag: ${CUSTOM_TAG}"
+
+      # ── Summary ──
+      - name: Summary
+        if: steps.check.outputs.skip == 'false'
+        run: |
+          TAG="${{ steps.upstream.outputs.tag }}"
+          echo "### Custom Docker Build Complete :rocket:" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| | |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| **Upstream Tag** | \`${TAG}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| **Image** | \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${TAG}-custom\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| **Also tagged as** | \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| **Git Tag** | \`custom-${TAG}\` |" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Skip summary
+        if: steps.check.outputs.skip == 'true'
+        run: |
+          echo "### Skipped — already built" >> "$GITHUB_STEP_SUMMARY"
+          echo "Tag \`custom-${{ steps.upstream.outputs.tag }}\` already exists." >> "$GITHUB_STEP_SUMMARY"
